@@ -22,6 +22,7 @@ import os
 import platform
 import shutil
 import time
+import traceback
 import urllib
 from datetime import datetime
 from functools import wraps
@@ -70,7 +71,7 @@ def notify_on_crash(func):
         except KeyboardInterrupt:
             pass
         except Exception as e:
-            log.debug(e)
+            log.error(traceback.format_exc())
             notification_handler.send_notification(f"FairGame has crashed.")
 
     return decorator
@@ -411,7 +412,7 @@ def amazonrequests(
     try:
         if offerid:
             amazon_requests_obj.run_offer_id(
-                offerid=offerid, delay=delay, all_cookies=all_cookies
+                offerid=offerid, delay=delay, all_cookies=all_cookies, test=test
             )
         else:
             amazon_requests_obj.run(delay=delay, test=test, all_cookies=all_cookies)

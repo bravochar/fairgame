@@ -7,6 +7,7 @@ import random
 import stdiomask
 import time
 import typing
+import urllib
 from contextlib import contextmanager
 from datetime import datetime
 from utils.debugger import debug
@@ -131,6 +132,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         super().__init__()
 
         self.shuffle = True
+        self.is_test = False
 
         self.notification_handler = notification_handler
         self.check_shipping = checkshipping
@@ -413,7 +415,9 @@ class AmazonStoreHandler(BaseStoreHandler):
         log.info(f'Logged in as {amazon_config["username"]}')
 
     # Test code, use at your own RISK
-    def run_offer_id(self, offerid, delay=5, all_cookies=False):
+    def run_offer_id(self, offerid, delay=5, all_cookies=False, test=False):
+        self.is_test = test
+
         # Load up the homepage
         with self.wait_for_page_change():
             self.driver.get(f"https://{self.amazon_domain}")
@@ -441,7 +445,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         )
         print(f"Checking OfferID: {offerid}\n")
 
-        item = SellerDetail(
+        seller = SellerDetail(
             offering_id=offerid,
             merchant_id="",
             price=parse_price("0"),
@@ -460,20 +464,36 @@ class AmazonStoreHandler(BaseStoreHandler):
                 idx = 0
             delay_time = time.time() + delay
 
-            pid, anti_csrf = self.turbo_initiate(qualified_seller=item)
-            if pid and anti_csrf:
-                if self.turbo_checkout(pid=pid, anti_csrf=anti_csrf):
-                    break
+            # try to checkout
+            if self.attempt_turbo_checkout(seller):
+                break
 
             # sleep remainder of delay_time
             time_left = delay_time - time.time()
             if time_left > 0:
                 time.sleep(time_left)
 
-        log.info("May have completed purchase, check orders!")
         log.info("Shutting down")
 
-    def run(self, delay=5, test=False, all_cookies=False):
+    def attempt_turbo_checkout(self, seller, delay=5, iters=1):
+        if iters > 1:
+            log.info(f"Attempting turbo checkout {iters} times...   ")
+
+        for i in range(1, iters + 1):
+            pid, anti_csrf = self.turbo_initiate(qualified_seller=seller)
+            if pid and anti_csrf:
+                if self.turbo_checkout(pid=pid, anti_csrf=anti_csrf):
+                    return True
+
+            if i < iters:
+                log.debug(f"Turbo attempt {i} was unsuccessful.")
+                time.sleep(delay)
+
+        return False
+
+    def run(self, delay=5, test=False, all_cookies=False, turbo_iters=1):
+        self.is_test = test
+
         # Load up the homepage
         with self.wait_for_page_change():
             self.driver.get(f"https://{self.amazon_domain}")
@@ -534,7 +554,6 @@ class AmazonStoreHandler(BaseStoreHandler):
         spinner = ["-", "\\", "|", "/"]
         check_count = 1
         while self.item_list:
-
             for item in self.item_list:
                 print(
                     recurring_message,
@@ -546,24 +565,21 @@ class AmazonStoreHandler(BaseStoreHandler):
                 idx += 1
                 if idx == len(spinner):
                     idx = 0
+                end_time_cart = 0
                 start_time = time.time()
                 delay_time = start_time + delay
-                successful = False
                 qualified_seller = self.find_qualified_seller(item)
-                log.debug(
-                    f"ASIN check for {item.id} took {time.time() - start_time} seconds."
-                )
+                end_time_check = time.time()
                 if qualified_seller:
                     if self.buy_it_now:
-                        pid, anti_csrf = self.turbo_initiate(
-                            qualified_seller=qualified_seller
-                        )
-                        if pid and anti_csrf:
-                            if self.turbo_checkout(pid=pid, anti_csrf=anti_csrf):
-                                if self.single_shot:
-                                    self.item_list.clear()
-                                else:
-                                    self.item_list.remove(item)
+                        if self.attempt_turbo_checkout(
+                            qualified_seller, delay, turbo_iters
+                        ):
+                            if self.single_shot:
+                                self.item_list.clear()
+                            else:
+                                self.item_list.remove(item)
+                        end_time_cart = time.time()
 
                     elif self.atc(qualified_seller=qualified_seller, item=item):
                         r = self.ptc()
@@ -584,9 +600,15 @@ class AmazonStoreHandler(BaseStoreHandler):
                                     self.item_list.clear()
                                 else:
                                     self.item_list.remove(item)
+                        end_time_cart = time.time()
 
-                if successful:
-                    break
+                log.debug(
+                    f"ASIN check for {item.id} took {end_time_check - start_time:.3f} seconds."
+                )
+                if end_time_cart:
+                    log.debug(
+                        f"Checkout for {item.id} took {end_time_cart - start_time:.3f} seconds."
+                    )
 
                 # sleep remainder of delay_time
                 time_left = delay_time - time.time()
@@ -643,32 +665,29 @@ class AmazonStoreHandler(BaseStoreHandler):
             log.debug(e)
             return False
 
-    @debug
     def find_qualified_seller(self, item) -> SellerDetail or None:
-        item_sellers = self.get_item_sellers(item, amazon_config["FREE_SHIPPING"])
-        if item_sellers:
-            for seller in item_sellers:
-                if not self.check_shipping and not free_shipping_check(seller):
-                    log.debug("Failed shipping hurdle.")
-                    continue
-                log.debug("Passed shipping hurdle.")
-                if item.condition == AmazonItemCondition.Any:
-                    log.debug("Skipping condition check")
-                elif not condition_check(item, seller):
-                    log.debug("Failed item condition hurdle.")
-                    continue
-                log.debug("Passed item condition hurdle.")
-                if not price_check(item, seller):
-                    log.debug("Failed price condition hurdle.")
-                    continue
-                log.debug("Passed price condition hurdle.")
-                if not merchant_check(item, seller):
-                    log.debug("Failed merchant id condition hurdle.")
-                    continue
-                log.debug("Passed merchant id condition hurdle.")
+        for seller in self.get_item_sellers(item, amazon_config["FREE_SHIPPING"]):
+            if not self.check_shipping and not free_shipping_check(seller):
+                log.debug("Failed shipping hurdle.")
+                continue
+            log.debug("Passed shipping hurdle.")
+            if item.condition == AmazonItemCondition.Any:
+                log.debug("Skipping condition check")
+            elif not condition_check(item, seller):
+                log.debug("Failed item condition hurdle.")
+                continue
+            log.debug("Passed item condition hurdle.")
+            if not price_check(item, seller):
+                log.debug("Failed price condition hurdle.")
+                continue
+            log.debug("Passed price condition hurdle.")
+            if not merchant_check(item, seller):
+                log.debug("Failed merchant id condition hurdle.")
+                continue
+            log.debug("Passed merchant id condition hurdle.")
 
-                # Returns first seller that passes condition checks
-                return seller
+            # Returns first seller that passes condition checks
+            return seller
 
     def parse_config(self):
         log.debug(f"Processing config file from {CONFIG_FILE_PATH}")
@@ -855,14 +874,13 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         return True
 
-    @debug
     def get_item_sellers(self, item, free_shipping_strings):
         """Parse out information to from the aod-offer nodes populate ItemDetail instances for each item """
         payload = self.get_real_time_data(item)
         sellers = []
         if payload is None or len(payload) == 0:
             log.error("Empty Response.  Skipping...")
-            return sellers
+            return
         # This is where the parsing magic goes
         log.debug(f"payload is {len(payload)} bytes")
 
@@ -888,7 +906,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                     tree = html.fromstring(payload)
                 else:
                     log.info(f"No valid page for ASIN {item.id}")
-                    return sellers
+                    return
             else:
                 log.info("captcha not found")
 
@@ -910,7 +928,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             log.debug(
                 f"Aborting Check, ASINs do not match. Found {found_asin}; Searching for {item.id}."
             )
-            return None
+            return
 
         # Get all the offers (pinned and others)
         offers = tree.xpath(
@@ -976,7 +994,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                     log.error("ATC form items did not exist, skipping")
                     continue
 
-                seller = SellerDetail(
+                yield SellerDetail(
                     merchant_id,
                     price,
                     shipping_cost,
@@ -984,36 +1002,45 @@ class AmazonStoreHandler(BaseStoreHandler):
                     offer_id,
                     atc_form=atc_form,
                 )
-                sellers.append(seller)
-        return sellers
 
-    @debug
-    def turbo_initiate(self, qualified_seller):
-        url = f"https://{self.amazon_domain}/checkout/turbo-initiate?ref_=dp_start-bbf_1_glance_buyNow_2-1&pipelineType=turbo&weblab=RCX_CHECKOUT_TURBO_DESKTOP_NONPRIME_87784&temporaryAddToCart=1"
+    def turbo_initiate(self, qualified_seller, asin=""):
+        url = f"https://{self.amazon_domain}/checkout/turbo-initiate"
+        query_dict = {
+            "ref_": "dp_start-bbf_1_glance_buyNow_2-1",
+            "pipelineType": "turbo",
+            "weblab": "RCX_CHECKOUT_TURBO_DESKTOP_PRIME_87783",
+            "temporaryAddToCart": "1",
+        }
         payload_inputs = {
             "offerListing.1": qualified_seller.offering_id,
             "quantity.1": "1",
         }
 
-        r = self.session_checkout.post(url=url, data=payload_inputs)
+        # set ASIN if supplied
+        if asin:
+            payload_inputs["asin.1"] = asin
+
+        r = self.session_checkout.post(url=url, params=query_dict, data=payload_inputs)
         if r.status_code == 200 and r.text:
             find_pid = re.search(r"pid=(.*?)&amp;", r.text)
             if find_pid:
                 pid = find_pid.group(1)
             else:
                 pid = None
+
             find_anti_csrf = re.search(r"'anti-csrftoken-a2z' value='(.*?)'", r.text)
             if find_anti_csrf:
                 anti_csrf = find_anti_csrf.group(1)
             else:
                 anti_csrf = None
-            if pid and anti_csrf:
-                log.debug("turbo-initiate successful")
-            else:
+
+            if not (pid and anti_csrf):
                 log.debug("turbo-initiate unsuccessful")
                 save_html_response(
                     filename="turbo_ini_unsuccessful", status=r.status_code, body=r.text
                 )
+                log_request(r)
+
             return pid, anti_csrf
         else:
             log.debug("turbo-initiate unsuccessful")
@@ -1022,23 +1049,37 @@ class AmazonStoreHandler(BaseStoreHandler):
             )
             return None, None
 
-    @debug
     def turbo_checkout(self, pid, anti_csrf):
+        rval = False
         log.debug("trying to checkout")
-        url = f"https://{self.amazon_domain}/checkout/spc/place-order?ref_=chk_spc_placeOrder&clientId=retailwebsite&pipelineType=turbo&pid={pid}"
+        url = f"https://{self.amazon_domain}/checkout/spc/place-order"
+        query_dict = {
+            "ref_": "chk_spc_placeOrder",
+            "clientId": "retailwebsite",
+            "pipelineType": "turbo",
+            "pid": f"{pid}",
+        }
 
         header_update = {"anti-csrftoken-a2z": anti_csrf}
         self.session_checkout.headers.update(header_update)
-        r = self.session_checkout.post(url=url)
-        if r.status_code == 200 or r.status_code == 500:
-            log.debug("Checkout maybe successful, check order page!")
-            # TODO: Implement GET request to confirm checkout
-            return True
-        else:
-            log.debug(f"Status Code: {r.status_code} was returned")
-            return False
 
-    @debug
+        if not self.is_test:
+            r = self.session_checkout.post(url=url, params=query_dict)
+            if r.status_code == 200 or r.status_code == 500:
+                log.debug("Checkout maybe successful, check order page!")
+                # TODO: Implement GET request to confirm checkout
+                rval = True
+
+            log_request(r)
+            save_html_response(
+                filename="turbo_checkout_response", status=r.status_code, body=r.text
+            )
+        else:
+            log.warning("This was a test, not completing checkout; returning True")
+            rval = True
+
+        return rval
+
     def atc(self, qualified_seller, item):
         post_action = qualified_seller.atc_form[0]
         payload_inputs = {}
@@ -1070,7 +1111,6 @@ class AmazonStoreHandler(BaseStoreHandler):
             log.info("ATC unsuccessful")
             return False
 
-    @debug
     def ptc(self):
         url = f"https://{self.amazon_domain}/gp/cart/view.html/ref=lh_co_dup?ie=UTF8&proceedToCheckout.x=129"
         try:
@@ -1086,7 +1126,6 @@ class AmazonStoreHandler(BaseStoreHandler):
             log.info("PTC unsuccessful")
             return None
 
-    @debug
     def pyo(self, page):
         pyo_html = html.fromstring(page)
         pyo_params = {
@@ -1238,7 +1277,6 @@ class AmazonStoreHandler(BaseStoreHandler):
             with self.wait_for_page_content_change():
                 self.driver.refresh()
 
-    @debug
     def get_html(self, url, s: requests.Session, randomize_ua=False):
         """Unified mechanism to get content to make changing connection clients easier"""
         f = furl(url)
@@ -1555,3 +1593,19 @@ def save_html_response(filename, status, body):
     page_source = body
     with open(file_name, "w", encoding="utf-8") as f:
         f.write(page_source)
+
+
+def log_request(r):
+    if hasattr(r, "request") and r.request is not None:
+        log.debug(repr(r.request))
+        try:
+            log.debug(
+                f"  body: {json.dumps(urllib.parse.parse_qs(r.request.body), indent=4)}"
+            )
+        except ValueError:
+            log.debug(f"  body: {r.request.body}")
+        log.debug(f"{r.request.method} {r.url}: {r.status_code}")
+    else:
+        log.debug(f"{r.url}: {r.status_code}")
+    log.debug(f"  headers: {json.dumps(dict(r.headers), indent=4)}")
+    log.debug(f"  cookies: {json.dumps(r.cookies.get_dict(), indent=4)}")
