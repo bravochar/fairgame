@@ -209,16 +209,21 @@ class AmazonStoreHandler(BaseStoreHandler):
             for proxy in self.proxies:
                 s = requests.Session()
                 s.headers.update(HEADERS)
+                s.headers.update({"user-agent": self.ua.random})
                 s.proxies.update(proxy)
 
                 # add a strikes count to weed out bad proxies/configurations
                 s.strikes = 0
                 self.proxy_sessions.append(s)
 
-            log.info(f"Created {len(self.proxy_sessions)} proxy sessions")
+            random.shuffle(self.proxy_sessions)
 
-            # initialize first proxy
-            self.proxy_sessions[0].get(f'https://{self.amazon_domain}')
+            # initialize first 2 proxies with Amazon cookies
+            for s in self.proxy_sessions[:2]:
+                s.get(f'https://{self.amazon_domain}')
+                time.sleep(1)
+
+            log.info(f"Created {len(self.proxy_sessions)} proxy sessions")
 
         # Spawn the web browser
         self.driver = create_driver(options)
@@ -241,13 +246,8 @@ class AmazonStoreHandler(BaseStoreHandler):
 
             if self.proxy_sessions:
                 rval = self.proxy_sessions.pop(0)
-
-                # TODO: move before delay time
-                # initialize amazon session cookie, if missing from _next_ proxy
-                if self.proxy_sessions and not self.proxy_sessions[0].cookies:
-                    self.proxy_sessions[0].get(f'https://{self.amazon_domain}')
-
                 self.used_proxy_sessions.append(rval)
+                log.debug(f"Using proxy {rval.proxies}")
 
 
         return rval
@@ -663,6 +663,11 @@ class AmazonStoreHandler(BaseStoreHandler):
                         and not self.proxy_sessions[1].cookies:
                     self.proxy_sessions[1].get(f'https://{self.amazon_domain}')
 
+                    # need to slow down proxy initialization by at least one second
+                    # trying to do it quicker results in a lot of 503s,
+                    # especially wihtout random user-agent strings
+                    time.sleep(1)
+
                 # sleep remainder of delay_time
                 time_left = delay_time - time.time()
                 if time_left > 0:
@@ -1066,8 +1071,17 @@ class AmazonStoreHandler(BaseStoreHandler):
     def attempt_turbo_checkout(self, seller, delay=5, iters=1):
         if self.proxies:
             log.debug("Trying with all proxies...")
-            random.shuffle(self.proxies)
-            for proxy in self.proxies:
+            proxies = self.proxies
+            random.shuffle(proxies)
+
+            if self.used_proxy_sessions:
+                last_proxy = self.used_proxy_sessions[-1].proxies
+                log.debug(f"Using proxy that pinged stock first: {last_proxy}")
+                proxies = [d for d in self.proxies if  d != last_proxy]
+                proxies.insert(0, last_proxy)
+
+            for proxy in proxies:
+                start_time = time.perf_counter()
                 # make a copy of the checkout session
                 session = requests.Session()
                 session.proxies.update(proxy)
@@ -1079,7 +1093,9 @@ class AmazonStoreHandler(BaseStoreHandler):
                     if self.turbo_checkout(session, pid=pid, anti_csrf=anti_csrf):
                         return True
 
-                time.sleep(0.5)
+                sleep_time = 0.5 - (time.perf_counter() - start_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         else:
             if iters > 1:
