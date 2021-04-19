@@ -198,12 +198,13 @@ class AmazonStoreHandler(BaseStoreHandler):
         #       'https': f"http://{username}:{password}@X.X.X.X:XXXX",
         #     },
         # ]
+        self.proxies = []
+        self.proxy_sessions = []
+        self.used_proxy_sessions = []
         if os.path.exists(PROXY_FILE_PATH):
             proxy_json = json.load(open(PROXY_FILE_PATH))
             self.proxies = proxy_json.get('proxies', [])
 
-            self.used_proxy_sessions = []
-            self.proxy_sessions = []
             # initialize sessions for each proxy
             for proxy in self.proxies:
                 s = requests.Session()
@@ -215,6 +216,9 @@ class AmazonStoreHandler(BaseStoreHandler):
                 self.proxy_sessions.append(s)
 
             log.info(f"Created {len(self.proxy_sessions)} proxy sessions")
+
+            # initialize first proxy
+            self.proxy_sessions[0].get(f'https://{self.amazon_domain}')
 
         # Spawn the web browser
         self.driver = create_driver(options)
@@ -232,20 +236,16 @@ class AmazonStoreHandler(BaseStoreHandler):
             if not self.proxy_sessions:
                 self.proxy_sessions = self.used_proxy_sessions
                 self.used_proxy_sessions = []
-                log.info('Shuffling proxies...')
+                log.debug('Shuffling proxies...')
                 random.shuffle(self.proxy_sessions)
 
             if self.proxy_sessions:
                 rval = self.proxy_sessions.pop(0)
-                # initialize amazon session cookie if missing
-                while not rval.cookies:
-                    # get a session cookie from amazon
-                    r = rval.get(f'https://{self.amazon_domain}')
-                    if not r.ok or not rval.cookies:
-                        log.error(f"Proxy {rval.proxies} failed GET check; removing")
-                        rval = self.proxy_sessions.pop(0)
-                    else:
-                        log.debug(f"Initialized proxy {rval.proxies}")
+
+                # TODO: move before delay time
+                # initialize amazon session cookie, if missing from _next_ proxy
+                if self.proxy_sessions and not self.proxy_sessions[0].cookies:
+                    self.proxy_sessions[0].get(f'https://{self.amazon_domain}')
 
                 self.used_proxy_sessions.append(rval)
 
@@ -456,6 +456,29 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         log.info(f'Logged in as {amazon_config["username"]}')
 
+    def transfer_selenium_cookies(
+        self, s: requests.Session, all_cookies=False
+    ):
+        # get cookies, might use these for checkout later, with no cookies on
+        # cookie_names = ["session-id", "ubid-main", "x-main", "at-main", "sess-at-main"]
+        # for c in self.driver.get_cookies():
+        #     if c["name"] in cookie_names:
+        #         self.amazon_cookies[c["name"]] = c["value"]
+
+        # update session with cookies from Selenium
+        cookie_names = ["session-id", "ubid-main", "x-main", "at-main", "sess-at-main"]
+        self.selenium_cookies_copy = self.driver.get_cookies().copy()
+        self.checkout_cookies = {}
+        log.debug(self.driver.get_cookies())
+        for c in self.driver.get_cookies():
+            if all_cookies or c["name"] in cookie_names:
+                self.checkout_cookies[c["name"]] = c["value"]
+                log.debug(f'Set Cookie {c["name"]} as value {c["value"]}')
+            else:
+                log.debug(f'Ignoring Cookie {c["name"]} as value {c["value"]}')
+
+        s.cookies.update(self.checkout_cookies)
+
     # Test code, use at your own RISK
     def run_offer_id(self, offerid, delay=5, all_cookies=False, test=False):
         self.is_test = test
@@ -469,8 +492,8 @@ class AmazonStoreHandler(BaseStoreHandler):
         if not self.is_logged_in():
             self.login()
 
-        transfer_selenium_cookies(
-            self.driver, self.session_checkout, all_cookies=all_cookies
+        self.transfer_selenium_cookies(
+            self.session_checkout, all_cookies=all_cookies
         )
 
         message = f"Starting to hunt items at {STORE_NAME}"
@@ -517,22 +540,6 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         log.info("Shutting down")
 
-    def attempt_turbo_checkout(self, seller, delay=5, iters=1):
-        if iters > 1:
-            log.info(f"Attempting turbo checkout {iters} times...   ")
-
-        for i in range(1, iters + 1):
-            pid, anti_csrf = self.turbo_initiate(qualified_seller=seller)
-            if pid and anti_csrf:
-                if self.turbo_checkout(pid=pid, anti_csrf=anti_csrf):
-                    return True
-
-            if i < iters:
-                log.debug(f"Turbo attempt {i} was unsuccessful.")
-                time.sleep(delay)
-
-        return False
-
     def run(self, delay=5, test=False, all_cookies=False, turbo_iters=1):
         self.is_test = test
 
@@ -561,13 +568,13 @@ class AmazonStoreHandler(BaseStoreHandler):
         # Transfer cookies from selenium session.
         # Do not transfer cookies to stock check if using proxies
         if not self.proxies:
-            transfer_selenium_cookies(
-                self.driver, self._session_stock_check, all_cookies=all_cookies
+            self.transfer_selenium_cookies(
+                self._session_stock_check, all_cookies=all_cookies
             )
             self._session_stock_check.headers.update(header_dict)
 
-        transfer_selenium_cookies(
-            self.driver, self.session_checkout, all_cookies=all_cookies
+        self.transfer_selenium_cookies(
+            self.session_checkout, all_cookies=all_cookies
         )
         self.session_checkout.headers.update(header_dict)
 
@@ -594,16 +601,6 @@ class AmazonStoreHandler(BaseStoreHandler):
         check_count = 1
         while self.item_list:
             for item in self.item_list:
-                print(
-                    recurring_message,
-                    f"Check Count: {check_count} ({100 * self.server_error_count / check_count:02.2f}% error),",
-                    spinner[idx],
-                    end="    \r",
-                )
-                check_count += 1
-                idx += 1
-                if idx == len(spinner):
-                    idx = 0
                 end_time_cart = 0
                 start_time = time.time()
                 delay_time = start_time + delay
@@ -648,6 +645,23 @@ class AmazonStoreHandler(BaseStoreHandler):
                     log.debug(
                         f"Checkout for {item.id} took {end_time_cart - start_time:.3f} seconds."
                     )
+
+                print(
+                    recurring_message,
+                    f"Check Count: {check_count} ({100 * self.server_error_count / check_count:02.2f}% error),",
+                    spinner[idx],
+                    end="    \r",
+                )
+                check_count += 1
+                idx += 1
+                if idx == len(spinner):
+                    idx = 0
+
+                # initialize amazon session cookie, if missing from _next_ proxy
+                if self.proxy_sessions \
+                        and len(self.proxy_sessions) > 1 \
+                        and not self.proxy_sessions[1].cookies:
+                    self.proxy_sessions[1].get(f'https://{self.amazon_domain}')
 
                 # sleep remainder of delay_time
                 time_left = delay_time - time.time()
@@ -820,6 +834,7 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         for idx, item in enumerate(self.item_list):
             # Check the cache first to save the scraping...
+            item.pdp_url = f"https://{self.amazon_domain}{PDP_PATH}{item.id}"
             if item.id in item_cache.keys():
                 cached_item = item_cache[item.id]
                 log.debug(f"Verifying ASIN {cached_item.id} via cache  ...")
@@ -828,6 +843,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                 cached_item.min_price = item.min_price
                 cached_item.max_price = item.max_price
                 cached_item.merchant_id = item.merchant_id
+                cached_item.pdp_url = item.pdp_url
                 self.item_list[idx] = cached_item
                 log.debug(
                     f"Verified ASIN {cached_item.id} as '{cached_item.short_name}'"
@@ -836,11 +852,12 @@ class AmazonStoreHandler(BaseStoreHandler):
                 continue
 
             # Verify that the ASIN hits and that we have a valid inventory URL
-            pdp_url = f"https://{self.amazon_domain}{PDP_PATH}{item.id}"
-            log.debug(f"Verifying at {pdp_url} ...")
+            log.debug(f"Verifying at {item.pdp_url} ...")
 
-            session = self.session_stock_check
-            data, status = self.get_html(pdp_url, s=session)
+            # use checkout session and good cookie to verify item list
+            session = self.session_checkout
+
+            data, status = self.get_html(item.pdp_url, s=session)
             if not data and not status:
                 log.debug("Response empty, skipping item")
                 continue
@@ -853,7 +870,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                 if captcha_form_element:
                     # Solving captcha and resetting data
                     data, status = solve_captcha(
-                        session, captcha_form_element[0], pdp_url
+                        session, captcha_form_element[0], item.pdp_url
                     )
 
             if status == 200:
@@ -866,7 +883,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                 )
                 if captcha_form_element:
                     data, status = solve_captcha(
-                        session, captcha_form_element[0], pdp_url
+                        session, captcha_form_element[0], item.pdp_url
                     )
                     if status != 200:
                         log.debug(f"ASIN {item.id} failed, skipping...")
@@ -899,7 +916,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                         )
             else:
                 log.error(
-                    f"Unable to locate details for {item.id} at {pdp_url}.  Removing from hunt."
+                    f"Unable to locate details for {item.id} at {item.pdp_url}.  Removing from hunt."
                 )
                 items_to_purge.append(item)
 
@@ -947,6 +964,11 @@ class AmazonStoreHandler(BaseStoreHandler):
                 else:
                     log.info(f"No valid page for ASIN {item.id}")
                     return
+            else:
+                log.debug("Got Server error")
+
+            # 503 responses won't ever have sellers
+            return
 
         # look for product ASIN
         page_asin = tree.xpath("//input[@id='ftSelectAsin']")
@@ -954,7 +976,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             try:
                 found_asin = page_asin[0].value.strip()
             except (AttributeError, IndexError):
-                found_asin = "[NO ASIN FOUND ON PAGE]"
+                found_asin = "[NO ASINS FOUND ON PAGE]"
         else:
             find_asin = re.search(r"asin\s?(?:=|\.)?\s?\"?([A-Z0-9]+)\"?", payload)
             if find_asin:
@@ -1041,7 +1063,44 @@ class AmazonStoreHandler(BaseStoreHandler):
                     atc_form=atc_form,
                 )
 
-    def turbo_initiate(self, qualified_seller, asin=""):
+    def attempt_turbo_checkout(self, seller, delay=5, iters=1):
+        if self.proxies:
+            log.debug("Trying with all proxies...")
+            random.shuffle(self.proxies)
+            for proxy in self.proxies:
+                # make a copy of the checkout session
+                session = requests.Session()
+                session.proxies.update(proxy)
+                session.headers.update(self.session_checkout.headers)
+                session.cookies.update(self.session_checkout.cookies)
+
+                pid, anti_csrf = self.turbo_initiate(session, qualified_seller=seller)
+                if pid and anti_csrf:
+                    if self.turbo_checkout(session, pid=pid, anti_csrf=anti_csrf):
+                        return True
+
+                time.sleep(0.5)
+
+        else:
+            if iters > 1:
+                log.info(f"Attempting turbo checkout {iters} times...   ")
+
+            for i in range(1, iters + 1):
+                pid, anti_csrf = self.turbo_initiate(self.session_checkout, qualified_seller=seller)
+                if pid and anti_csrf:
+                    if self.turbo_checkout(self.session_checkout, pid=pid, anti_csrf=anti_csrf):
+                        return True
+
+                if i < iters:
+                    log.debug(f"Turbo attempt {i} was unsuccessful.")
+                    time.sleep(delay)
+
+        return False
+
+    def turbo_initiate(self, session, qualified_seller, asin=""):
+        pid, anti_csrf = None, None
+        log_message = "turbo-initiate unsuccessful"
+
         url = f"https://{self.amazon_domain}/checkout/turbo-initiate"
         query_dict = {
             "ref_": "dp_start-bbf_1_glance_buyNow_2-1",
@@ -1058,36 +1117,31 @@ class AmazonStoreHandler(BaseStoreHandler):
         if asin:
             payload_inputs["asin.1"] = asin
 
-        r = self.session_checkout.post(url=url, params=query_dict, data=payload_inputs)
+        # clear all except default headers
+        session.headers.clear()
+        session.headers.update(HEADERS)
+
+        r = session.post(url=url, params=query_dict, data=payload_inputs)
         if r.status_code == 200 and r.text:
             find_pid = re.search(r"pid=(.*?)&amp;", r.text)
             if find_pid:
                 pid = find_pid.group(1)
-            else:
-                pid = None
 
             find_anti_csrf = re.search(r"'anti-csrftoken-a2z' value='(.*?)'", r.text)
             if find_anti_csrf:
                 anti_csrf = find_anti_csrf.group(1)
-            else:
-                anti_csrf = None
 
-            if not (pid and anti_csrf):
-                log.debug("turbo-initiate unsuccessful")
-                save_html_response(
-                    filename="turbo_ini_unsuccessful", status=r.status_code, body=r.text
-                )
-                log_request(r)
+        if pid and anti_csrf:
+            log_message = 'turbo_ini_successful'
 
-            return pid, anti_csrf
         else:
-            log.debug("turbo-initiate unsuccessful")
-            save_html_response(
-                filename="turbo_ini_unsuccessful", status=r.status_code, body=r.text
-            )
-            return None, None
+            save_request_response(log_message, r)
+            log_request(r)
+        log.debug(log_message)
 
-    def turbo_checkout(self, pid, anti_csrf):
+        return pid, anti_csrf
+
+    def turbo_checkout(self, session, pid, anti_csrf):
         rval = False
         log.debug("trying to checkout")
         url = f"https://{self.amazon_domain}/checkout/spc/place-order"
@@ -1099,12 +1153,12 @@ class AmazonStoreHandler(BaseStoreHandler):
         }
 
         header_update = {"anti-csrftoken-a2z": anti_csrf}
-        self.session_checkout.headers.update(header_update)
+        session.headers.update(header_update)
 
         if not self.is_test:
-            r = self.session_checkout.post(url=url, params=query_dict)
+            r = session.post(url=url, params=query_dict)
             if r.status_code == 200 or r.status_code == 500:
-                log.debug("Checkout maybe successful, check order page!")
+                log.info("Checkout maybe successful, check order page!")
                 # TODO: Implement GET request to confirm checkout
                 rval = True
 
@@ -1257,14 +1311,14 @@ class AmazonStoreHandler(BaseStoreHandler):
         log.debug(f"Calling {STORE_NAME} for {item.short_name} using {item.furl.url}")
 
         session = self.session_stock_check
-        if session.proxies:
-            log.debug(f"Using proxy: {session.proxies}")
 
         params = {"anticache": str(secrets.token_urlsafe(32))}
         item.furl.args.update(params)
+        session.headers['referer'] = item.pdp_url
         data, status = self.get_html(
             item.furl.url, s=session
         )
+        session.headers.pop('referer', None)
 
         if item.status_code != status:
             # Track when we flip-flop between status codes.  200 -> 204 may be intelligent caching at Amazon.
@@ -1606,23 +1660,6 @@ def get_timestamp_filename(name, extension):
         return name + "_" + date + "." + extension
 
 
-def transfer_selenium_cookies(
-    d: webdriver.Chrome, s: requests.Session, all_cookies=False
-):
-    # get cookies, might use these for checkout later, with no cookies on
-    # cookie_names = ["session-id", "ubid-main", "x-main", "at-main", "sess-at-main"]
-    # for c in self.driver.get_cookies():
-    #     if c["name"] in cookie_names:
-    #         self.amazon_cookies[c["name"]] = c["value"]
-
-    # update session with cookies from Selenium
-    cookie_names = ["session-id", "ubid-main", "x-main", "at-main", "sess-at-main"]
-    for c in d.get_cookies():
-        if all_cookies or c["name"] in cookie_names:
-            s.cookies.set(name=c["name"], value=c["value"])
-            log.dev(f'Set Cookie {c["name"]} as value {c["value"]}')
-
-
 def save_html_response(filename, status, body):
     """Saves response body"""
     file_name = get_timestamp_filename(
@@ -1634,9 +1671,32 @@ def save_html_response(filename, status, body):
         f.write(page_source)
 
 
+def save_request_response(filename, response):
+    """Saves request response
+
+    Saves all data associated with the response, including the initial
+    request"""
+    file_name = get_timestamp_filename(
+        "html_saves/" + filename + "_" + str(response.status_code) + "_full_request_response", "txt"
+    )
+
+    with open(file_name, "w", encoding="utf-8") as f:
+        if response.request:
+            f.write(f"REQUEST: {response.request.method} {response.request.url}\n\n")
+            for k, v in response.request.headers.items():
+                f.write(f"    {k}: {v}\n")
+            f.write(f"\n\n{response.request.body}")
+
+        f.write(f"\n\nRESPONSE: {response.status_code}\n\n")
+        for k, v in response.headers.items():
+            f.write(f"    {k}: {v}\n")
+        f.write(f"\n\n{response.text}")
+
+
 def log_request(r):
     if hasattr(r, "request") and r.request is not None:
         log.debug(repr(r.request))
+        log.debug(f"  headers: {json.dumps(dict(r.request.headers), indent=4)}")
         try:
             log.debug(
                 f"  body: {json.dumps(urllib.parse.parse_qs(r.request.body), indent=4)}"
@@ -1646,5 +1706,20 @@ def log_request(r):
         log.debug(f"{r.request.method} {r.url}: {r.status_code}")
     else:
         log.debug(f"{r.url}: {r.status_code}")
+    log.debug(f"  headers: {json.dumps(dict(r.headers), indent=4)}")
+    log.debug(f"  cookies: {json.dumps(r.cookies.get_dict(), indent=4)}")
+
+
+def log_response(r):
+    if hasattr(r, "request") and r.request is not None:
+        log.debug(f"REQUEST: {r.request.method} {r.url}: {r.status_code}")
+        log.debug(f"  headers: {json.dumps(dict(r.request.headers), indent=4)}")
+        try:
+            log.debug(
+                f"  body: {json.dumps(urllib.parse.parse_qs(r.request.body), indent=4)}"
+            )
+        except ValueError:
+            log.debug(f"  body: {r.request.body}")
+    log.debug(f"RESPONSE: {r.status_code}")
     log.debug(f"  headers: {json.dumps(dict(r.headers), indent=4)}")
     log.debug(f"  cookies: {json.dumps(r.cookies.get_dict(), indent=4)}")
