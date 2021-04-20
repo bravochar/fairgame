@@ -129,6 +129,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         wait_on_captcha_fail=False,
         transfer_headers=False,
         use_atc_mode=False,
+        proxy_checkout=False,
     ) -> None:
         super().__init__()
 
@@ -153,6 +154,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         self.amazon_cookies = {}
         self.transfer_headers = transfer_headers
         self.buy_it_now = not use_atc_mode
+        self.proxy_checkout = proxy_checkout
 
         if not self.buy_it_now:
             log.warning("Using legacy add-to-cart mode instead of turbo_initiate")
@@ -1068,8 +1070,20 @@ class AmazonStoreHandler(BaseStoreHandler):
                     atc_form=atc_form,
                 )
 
+    def do_turbo_checkout(self, session, seller):
+        pid, anti_csrf = self.turbo_initiate(session, qualified_seller=seller)
+        if pid and anti_csrf:
+            if self.turbo_checkout(session, pid=pid, anti_csrf=anti_csrf):
+                return True
+
+        return False
+
     def attempt_turbo_checkout(self, seller, delay=5, iters=1):
-        if self.proxies:
+        # try to checkout
+        if self.do_turbo_checkout(self.session_checkout, seller):
+            return True
+
+        if self.proxies and self.proxy_checkout:
             log.debug("Trying with all proxies...")
             proxies = self.proxies
             random.shuffle(proxies)
@@ -1088,34 +1102,14 @@ class AmazonStoreHandler(BaseStoreHandler):
                 session.headers.update(self.session_checkout.headers)
                 session.cookies.update(self.session_checkout.cookies)
 
-                pid, anti_csrf = self.turbo_initiate(session, qualified_seller=seller)
-                if pid and anti_csrf:
-                    if self.turbo_checkout(session, pid=pid, anti_csrf=anti_csrf):
-                        return True
-
-                sleep_time = 0.5 - (time.perf_counter() - start_time)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-        else:
-            if iters > 1:
-                log.info(f"Attempting turbo checkout {iters} times...   ")
-
-            for i in range(1, iters + 1):
-                pid, anti_csrf = self.turbo_initiate(self.session_checkout, qualified_seller=seller)
-                if pid and anti_csrf:
-                    if self.turbo_checkout(self.session_checkout, pid=pid, anti_csrf=anti_csrf):
-                        return True
-
-                if i < iters:
-                    log.debug(f"Turbo attempt {i} was unsuccessful.")
-                    time.sleep(delay)
+                if self.do_turbo_checkout(session, seller):
+                    return True
 
         return False
 
     def turbo_initiate(self, session, qualified_seller, asin=""):
         pid, anti_csrf = None, None
-        log_message = "turbo-initiate unsuccessful"
+        log_message = 'turbo_ini_unsuccessful'
 
         url = f"https://{self.amazon_domain}/checkout/turbo-initiate"
         query_dict = {
@@ -1137,23 +1131,29 @@ class AmazonStoreHandler(BaseStoreHandler):
         session.headers.clear()
         session.headers.update(HEADERS)
 
-        r = session.post(url=url, params=query_dict, data=payload_inputs)
-        if r.status_code == 200 and r.text:
-            find_pid = re.search(r"pid=(.*?)&amp;", r.text)
-            if find_pid:
-                pid = find_pid.group(1)
+        # try up to 5 times, once every second, as long as we get 200
+        for _ in range(5):
+            start_time = time.perf_counter()
+            r = session.post(url=url, params=query_dict, data=payload_inputs)
+            if r.status_code == 200:
+                if r.text:
+                    find_pid = re.search(r"pid=(.*?)&amp;", r.text)
+                    if find_pid:
+                        pid = find_pid.group(1)
 
-            find_anti_csrf = re.search(r"'anti-csrftoken-a2z' value='(.*?)'", r.text)
-            if find_anti_csrf:
-                anti_csrf = find_anti_csrf.group(1)
+                    find_anti_csrf = re.search(r"'anti-csrftoken-a2z' value='(.*?)'", r.text)
+                    if find_anti_csrf:
+                        anti_csrf = find_anti_csrf.group(1)
+                        break
+            else:
+                log.debug(f"turbo_initiate returned {r.status_code}")
+                break
 
-        if pid and anti_csrf:
-            log_message = 'turbo_ini_successful'
-
-        else:
+            log.debug(log_message)
             save_request_response(log_message, r)
-            log_request(r)
-        log.debug(log_message)
+            sleep_time = 1 - (time.perf_counter() - start_time)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
         return pid, anti_csrf
 

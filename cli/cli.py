@@ -335,6 +335,12 @@ def amazon(
     default=False,
     help="Use legacy add-to-cart mode",
 )
+@click.option(
+    "--proxy-checkout",
+    is_flag=True,
+    default=False,
+    help="Attempt to complete turbo_checkout with proxies",
+)
 @notify_on_crash
 def amazonrequests(
     headless,
@@ -357,6 +363,7 @@ def amazonrequests(
     all_cookies,
     transfer_headers,
     use_atc_mode,
+    proxy_checkout,
 ):
     log.warning(
         "Experimental test balloon.  Do not attempt to use.  Your computer could catch fire."
@@ -407,6 +414,7 @@ def amazonrequests(
         wait_on_captcha_fail=captcha_wait,
         transfer_headers=transfer_headers,
         use_atc_mode=use_atc_mode,
+        proxy_checkout=proxy_checkout,
     )
 
     try:
