@@ -1,5 +1,6 @@
 import fileinput
 import json
+import lxml
 import os
 import pickle
 import platform
@@ -945,13 +946,16 @@ class AmazonStoreHandler(BaseStoreHandler):
         """Parse out information to from the aod-offer nodes populate ItemDetail instances for each item """
         payload = self.get_real_time_data(item)
         sellers = []
-        if payload is None or len(payload) == 0:
+
+        tree = None
+        try:
+            tree = html.fromstring(payload)
+        except (lxml.etree.ParserError, TypeError):
             log.error("Empty Response.  Skipping...")
             return
+
         # This is where the parsing magic goes
         log.debug(f"payload is {len(payload)} bytes")
-
-        tree = html.fromstring(payload)
 
         if item.status_code == 503:
             self.server_error_count += 1
