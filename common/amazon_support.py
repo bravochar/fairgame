@@ -108,10 +108,20 @@ class SellerDetail:
     condition: int = AmazonItemCondition.New
     offering_id: str = None
     atc_form: list = []
+    item_id: str = None
 
     @property
     def selling_price(self) -> Decimal:
         return self.price.amount + self.shipping_cost.amount
+
+    def __str__(self):
+        rval = f"SellerDetail({self.merchant_id}, {self.price.amount_text} + {self.shipping_cost.amount_text}"
+        if self.item_id is not None:
+            rval += f", {self.item_id}"
+
+        rval += f", {self.offering_id})"
+
+        return rval
 
 
 @attr.s(auto_attribs=True)

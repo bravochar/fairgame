@@ -667,7 +667,7 @@ class AmazonStoreHandler(BaseStoreHandler):
 
                     # need to slow down proxy initialization by at least one second
                     # trying to do it quicker results in a lot of 503s,
-                    # especially wihtout random user-agent strings
+                    # even with random user-agent strings
                     time.sleep(1)
 
                 # sleep remainder of delay_time
@@ -728,25 +728,20 @@ class AmazonStoreHandler(BaseStoreHandler):
     def find_qualified_seller(self, item) -> SellerDetail or None:
         for seller in self.get_item_sellers(item, amazon_config["FREE_SHIPPING"]):
             if not self.check_shipping and not free_shipping_check(seller):
-                log.debug("Failed shipping hurdle.")
+                log.debug(f"Failed shipping hurdle.")
                 continue
-            log.debug("Passed shipping hurdle.")
-            if item.condition == AmazonItemCondition.Any:
-                log.debug("Skipping condition check")
-            elif not condition_check(item, seller):
-                log.debug("Failed item condition hurdle.")
+            if not condition_check(item, seller):
+                log.debug(f"Failed item condition hurdle: {seller.condition}")
                 continue
-            log.debug("Passed item condition hurdle.")
             if not price_check(item, seller):
-                log.debug("Failed price condition hurdle.")
+                log.debug(f"Failed price condition hurdle: {seller.price}")
                 continue
-            log.debug("Passed price condition hurdle.")
             if not merchant_check(item, seller):
-                log.debug("Failed merchant id condition hurdle.")
+                log.debug(f"Failed merchant id hurdle: {seller.merchant_id}")
                 continue
-            log.debug("Passed merchant id condition hurdle.")
 
             # Returns first seller that passes condition checks
+            log.debug(f"Found seller: {seller}")
             return seller
 
     def parse_config(self):
@@ -1068,6 +1063,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                     condition,
                     offer_id,
                     atc_form=atc_form,
+                    item_id=item.id
                 )
 
     def do_turbo_checkout(self, session, seller):
@@ -1095,7 +1091,6 @@ class AmazonStoreHandler(BaseStoreHandler):
                 proxies.insert(0, last_proxy)
 
             for proxy in proxies:
-                start_time = time.perf_counter()
                 # make a copy of the checkout session
                 session = requests.Session()
                 session.proxies.update(proxy)
@@ -1131,8 +1126,8 @@ class AmazonStoreHandler(BaseStoreHandler):
         session.headers.clear()
         session.headers.update(HEADERS)
 
-        # try up to 5 times, once every second, as long as we get 200
-        for _ in range(5):
+        # try up to 3 times, as long as we get 200
+        for _ in range(3):
             start_time = time.perf_counter()
             r = session.post(url=url, params=query_dict, data=payload_inputs)
             if r.status_code == 200:
@@ -1151,9 +1146,6 @@ class AmazonStoreHandler(BaseStoreHandler):
 
             log.debug(log_message)
             save_request_response(log_message, r)
-            sleep_time = 1 - (time.perf_counter() - start_time)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
 
         return pid, anti_csrf
 
@@ -1339,11 +1331,9 @@ class AmazonStoreHandler(BaseStoreHandler):
         if item.status_code != status:
             # Track when we flip-flop between status codes.  200 -> 204 may be intelligent caching at Amazon.
             # We need to know if it ever goes back to a 200
-            '''
             log.warning(
                 f"{item.short_name} started responding with Status Code {status} instead of {item.status_code}"
             )
-            '''
             item.status_code = status
 
         return data
@@ -1389,7 +1379,7 @@ class AmazonStoreHandler(BaseStoreHandler):
     def get_html(self, url, s: requests.Session, randomize_ua=False):
         """Unified mechanism to get content to make changing connection clients easier"""
         f = furl(url)
-        if randomize_ua:
+        if randomize_ua and not self.proxies:
             user_agent = {"user-agent": self.ua.random}
             s.headers.update(user_agent)
         if not f.scheme:
