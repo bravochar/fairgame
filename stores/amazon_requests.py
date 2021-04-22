@@ -244,7 +244,15 @@ class AmazonStoreHandler(BaseStoreHandler):
                 self.proxy_sessions = self.used_proxy_sessions
                 self.used_proxy_sessions = []
                 log.debug('Shuffling proxies...')
-                random.shuffle(self.proxy_sessions)
+
+                # shuffle the two halves to maintain a large-ish delay
+                # between 2 consecutive uses of the same proxy
+                len_proxies = len(self.proxy_sessions)
+                a = self.proxy_sessions[:len_proxies//2]
+                b = self.proxy_sessions[len_proxies//2:]
+                random.shuffle(a)
+                random.shuffle(b)
+                self.proxy_sessions = a + b
 
             if self.proxy_sessions:
                 rval = self.proxy_sessions.pop(0)
