@@ -19,7 +19,6 @@ import re
 import psutil
 import requests
 from amazoncaptcha import AmazonCaptcha
-from chromedriver_py import binary_path
 from furl import furl
 from lxml import html
 from price_parser import parse_price, Price
@@ -50,7 +49,7 @@ from common.amazon_support import (
 from notifications.notifications import NotificationHandler
 from stores.basestore import BaseStoreHandler
 from utils.logger import log
-from utils.selenium_utils import enable_headless, options
+from utils.selenium_utils import enable_headless, options, create_driver
 
 from functools import wraps
 
@@ -517,6 +516,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         self.delete_driver()
 
     def run(self, delay=5, test=False, all_cookies=False, ludicrous_mode=False):
+        self.is_test = test
         # checkout_session_count = 1
         checkout_sessions = [self.session_checkout]
         checkout_sessions[0].headers.update({"user-agent": self.ua.random})
@@ -615,7 +615,7 @@ class AmazonStoreHandler(BaseStoreHandler):
                                 #     f.write(r)
                                 if r:
                                     log.debug(r)
-                                    if test:
+                                    if self.is_test:
                                         print(
                                             "Proceeded to Checkout - Will not Place Order as this is a Test",
                                             end="\r",
@@ -1124,14 +1124,19 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         header_update = {"anti-csrftoken-a2z": anti_csrf}
         self.session_checkout.headers.update(header_update)
-        r = self.session_checkout.post(url=url)
-        if r.status_code == 200 or r.status_code == 500:
-            log.debug("Checkout maybe successful, check order page!")
-            # TODO: Implement GET request to confirm checkout
-            return True
+        if not self.is_test:
+            r = self.session_checkout.post(url=url)
+            if r.status_code == 200 or r.status_code == 500:
+                log.debug("Checkout maybe successful, check order page!")
+                # TODO: Implement GET request to confirm checkout
+                return True
+            else:
+                log.debug(f"Status Code: {r.status_code} was returned")
         else:
-            log.debug(f"Status Code: {r.status_code} was returned")
-            return False
+            log.warning("This was a test run; not completing checkout")
+            return True
+
+        return False
 
     @debug
     def atc(self, qualified_seller, item):
@@ -1532,20 +1537,6 @@ def new_first(seller: SellerDetail):
     return seller.condition
 
 
-def create_driver(options):
-    try:
-        return webdriver.Chrome(executable_path=binary_path, options=options)
-    except Exception as e:
-        log.error(e)
-        log.error(
-            "If you have a JSON warning above, try deleting your .profile-amz folder"
-        )
-        log.error(
-            "If that's not it, you probably have a previous Chrome window open. You should close it."
-        )
-        exit(1)
-
-
 def modify_browser_profile():
     # Delete crashed, so restore pop-up doesn't happen
     path_to_prefs = os.path.join(
@@ -1579,10 +1570,6 @@ def get_prefs(no_image):
     else:
         prefs["profile.managed_default_content_settings.images"] = 0
     return prefs
-
-
-def create_webdriver_wait(driver, wait_time=10):
-    return WebDriverWait(driver, wait_time)
 
 
 def get_webdriver_pids(driver):

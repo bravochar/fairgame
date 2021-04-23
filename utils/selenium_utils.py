@@ -18,14 +18,22 @@
 #      https://github.com/Hari-Nagarajan/fairgame
 
 import requests
+
+from chromedriver_py import binary_path
+
+from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.remote.remote_connection import LOGGER as selenium_logger
+
 from urllib3.connectionpool import log as urllib_logger
+
 from logging import WARNING as logging_WARNING
+
+from .logger import log
 
 options = Options()
 options.add_experimental_option(
@@ -159,3 +167,17 @@ def enable_headless():
 
 def disable_gpu():
     options.add_argument("--disable-gpu")
+
+
+def create_driver(options):
+    try:
+        return webdriver.Chrome(executable_path=binary_path, options=options)
+    except Exception as e:
+        log.error(e)
+        log.error(
+            "If you have a JSON warning above, try deleting your .profile-amz folder"
+        )
+        log.error(
+            "If that's not it, you probably have a previous Chrome window open. You should close it."
+        )
+        exit(1)

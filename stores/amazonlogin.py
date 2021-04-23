@@ -37,7 +37,6 @@ import re
 import psutil
 import requests
 from amazoncaptcha import AmazonCaptcha
-from chromedriver_py import binary_path
 from furl import furl
 from lxml import html
 from price_parser import parse_price, Price
@@ -58,7 +57,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from notifications.notifications import NotificationHandler
 from stores.basestore import BaseStoreHandler
 from utils.logger import log
-from utils.selenium_utils import enable_headless, options
+from utils.selenium_utils import enable_headless, options, create_driver
 
 from functools import wraps
 
@@ -373,20 +372,6 @@ def get_timestamp_filename(name, extension):
         return name + "_" + date + "." + extension
 
 
-def create_driver(options):
-    try:
-        return webdriver.Chrome(executable_path=binary_path, options=options)
-    except Exception as e:
-        log.error(e)
-        log.error(
-            "If you have a JSON warning above, try deleting your .profile-amz folder"
-        )
-        log.error(
-            "If that's not it, you probably have a previous Chrome window open. You should close it."
-        )
-        exit(1)
-
-
 def get_webdriver_pids(driver):
     pid = driver.service.process.pid
     driver_process = psutil.Process(pid)
@@ -428,10 +413,6 @@ def get_prefs(no_image):
     else:
         prefs["profile.managed_default_content_settings.images"] = 0
     return prefs
-
-
-def create_webdriver_wait(driver, wait_time=10):
-    return WebDriverWait(driver, wait_time)
 
 
 def get_cookies(d: webdriver.Chrome, cookie_list=None):
