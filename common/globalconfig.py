@@ -26,6 +26,7 @@ from utils.logger import log
 
 GLOBAL_CONFIG_FILE = "config/fairgame.conf"
 AMAZON_CREDENTIAL_FILE = "config/amazon_credentials.json"
+BEST_BUY_CREDENTIAL_FILE = "config/best_buy_credentials.json"
 
 
 def await_credential_input():
@@ -68,6 +69,15 @@ class GlobalConfig:
             AMAZON_CREDENTIAL_FILE, encryption_pass
         )
         return amazon_config
+
+    def get_best_buy_config(self, encryption_pass=None):
+        log.info("Initializing Best Buy configuration...")
+        # Load up all things Best Buy
+        best_buy_config = self.global_config["BEST_BUY"]
+        best_buy_config["username"], best_buy_config["password"] = get_credentials(
+            BEST_BUY_CREDENTIAL_FILE, encryption_pass
+        )
+        return best_buy_config
 
     def get_fairgame_config(self):
         return self.fairgame_config

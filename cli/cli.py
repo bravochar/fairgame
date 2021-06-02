@@ -133,6 +133,27 @@ def amazon_aio(headless, p, delay, proxies, checkshipping):
     log.info("All tasks complete, exiting program")
 
 
+@click.command()
+@click.option(
+    "--p",
+    type=str,
+    default=None,
+    help="Pass in encryption file password as argument",
+)
+@click.option(
+    "--delay", type=float, default=5.0, help="Time to wait between checks for item[s]"
+)
+@notify_on_crash
+def best_buy(p, delay):
+    log.debug("Creating Best Buy Store Handler")
+    best_buy_obj = BestBuyStoreHandler(
+        notification_handler=notification_handler,
+        encryption_pass=p,
+        delay=delay,
+    )
+    log.info("All tasks complete, exiting program")
+
+
 # async def task_handler(tasks: List[asyncio.Task]):
 #     while tasks:
 #         for task in tasks:
