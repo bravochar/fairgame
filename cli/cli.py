@@ -33,6 +33,7 @@ from common.globalconfig import GlobalConfig
 from notifications.notifications import NotificationHandler, TIME_FORMAT
 
 from stores.amazon_handler import AmazonStoreHandler as AIO_AmazonStoreHandler
+from stores.best_buy_handler import BestBuyStoreHandler
 from utils.logger import log
 from utils.version import is_latest, version, get_latest_version
 
@@ -151,6 +152,9 @@ def best_buy(p, delay):
         encryption_pass=p,
         delay=delay,
     )
+
+    best_buy_obj.run()
+
     log.info("All tasks complete, exiting program")
 
 
@@ -325,6 +329,7 @@ main.add_command(find_endpoints)
 main.add_command(show_traceroutes)
 main.add_command(test_logging)
 main.add_command(amazon_aio)
+main.add_command(best_buy)
 
 # Global scope stuff here
 if is_latest():

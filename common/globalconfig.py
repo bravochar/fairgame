@@ -30,8 +30,8 @@ BEST_BUY_CREDENTIAL_FILE = "config/best_buy_credentials.json"
 
 
 def await_credential_input():
-    username = input("Amazon login ID: ")
-    password = stdiomask.getpass(prompt="Amazon Password: ")
+    username = input("Login ID: ")
+    password = stdiomask.getpass(prompt="Password: ")
     return {
         "username": username,
         "password": password,
